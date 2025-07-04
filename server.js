@@ -1,89 +1,92 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
-const bodyParser = require('body-parser');
 const cors = require('cors');
-const fetch = require('undici').fetch;
-
-global.fetch = fetch;
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+app.use(cors());
+app.use(express.json());
 
+// Supabase credentials
+const SUPABASE_URL = 'https://gmamvaeffhzyeslzwekg.supabase.co';
+const SUPABASE_KEY = 'YOUR_SERVICE_ROLE_KEY_HERE'; // Replace with your actual service_role key
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-app.use(cors());
-app.use(bodyParser.json());
-
+// Home route (basic test)
 app.get('/', (req, res) => {
-    res.send('✅ Key Generator API is running.');
+  res.send('Key Generator API is running');
 });
 
-// Test route to check Supabase connectivity and table access
-app.get('/test', async (req, res) => {
-    const { data, error } = await supabase.from('api_keys').select('*').limit(1);
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
-});
-
-// Generate key with userId and hwid
+// Generate a new key
 app.post('/generate-key', async (req, res) => {
-    const { userId, hwid } = req.body;
+  const { userId, hwid, durationDays } = req.body;
 
-    if (!userId || !hwid) {
-        return res.status(400).json({ error: 'User ID and HWID are required' });
-    }
+  if (!userId || !hwid || !durationDays) {
+    return res.status(400).json({ error: 'User ID, HWID, and durationDays are required' });
+  }
 
-    const apiKey = uuidv4() + '-' + Math.random().toString(36).substr(2, 9);
+  const apiKey = uuidv4() + '-' + Math.random().toString(36).substr(2, 9);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
 
-    const result = await supabase
-        .from('api_keys')
-        .insert([{ user_id: userId, api_key: apiKey, hwid: hwid, is_active: true }]);
+  const { error } = await supabase
+    .from('api_keys')
+    .insert([
+      {
+        user_id: userId,
+        api_key: apiKey,
+        hwid: hwid,
+        is_active: true,
+        created_at: now.toISOString(),
+        expires_at: expiresAt.toISOString()
+      }
+    ]);
 
-    console.log('Supabase Insert Result:', result);
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
 
-    if (result.error) {
-        return res.status(500).json({ error: result.error.message || 'Unknown Supabase error' });
-    }
-
-    return res.json({ apiKey });
+  res.json({ apiKey, expiresAt });
 });
 
-// List all keys for a user (with HWID and status)
-app.get('/keys/:userId', async (req, res) => {
-    const { userId } = req.params;
+// Validate a key
+app.post('/validate-key', async (req, res) => {
+  const { apiKey, hwid } = req.body;
 
-    const { data, error } = await supabase
-        .from('api_keys')
-        .select('api_key, hwid, is_active')
-        .eq('user_id', userId);
+  if (!apiKey || !hwid) {
+    return res.status(400).json({ error: 'API key and HWID are required' });
+  }
 
-    if (error) return res.status(500).json({ error: error.message });
+  const { data, error } = await supabase
+    .from('api_keys')
+    .select('*')
+    .eq('api_key', apiKey)
+    .limit(1)
+    .maybeSingle();
 
-    res.json(data);
-});
+  if (error || !data) {
+    return res.status(404).json({ error: 'API key not found' });
+  }
 
-// Deactivate a key
-app.post('/deactivate-key', async (req, res) => {
-    const { apiKey } = req.body;
+  const now = new Date();
 
-    if (!apiKey) {
-        return res.status(400).json({ error: 'API key is required' });
-    }
+  if (!data.is_active) {
+    return res.status(403).json({ error: 'Key is inactive' });
+  }
 
-    const { error } = await supabase
-        .from('api_keys')
-        .update({ is_active: false })
-        .eq('api_key', apiKey);
+  if (data.hwid !== hwid) {
+    return res.status(403).json({ error: 'HWID mismatch' });
+  }
 
-    if (error) return res.status(500).json({ error: error.message });
+  if (data.expires_at && new Date(data.expires_at) < now) {
+    return res.status(403).json({ error: 'Key expired' });
+  }
 
-    res.json({ message: 'Key deactivated successfully' });
+  res.json({ valid: true, user_id: data.user_id });
 });
 
 app.listen(port, () => {
-    console.log(`✅ Server running at http://localhost:${port}`);
+  console.log(`✅ Server running on port ${port}`);
 });
